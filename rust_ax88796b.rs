@@ -2,74 +2,92 @@
 
 //! Rust Asix PHYs driver
 use kernel::c_str;
-use kernel::net::phy;
+use kernel::net::phy::{self, DeviceId, Driver};
 use kernel::prelude::*;
+use kernel::uapi;
 
-module! {
+kernel::module_phy_driver! {
+    drivers: [PhyAX88772A, PhyAX88772C, PhyAX88796B],
+    device_table: [
+        DeviceId::new_with_driver::<PhyAX88772A>(),
+        DeviceId::new_with_driver::<PhyAX88772C>(),
+        DeviceId::new_with_driver::<PhyAX88796B>()
+    ],
     type: RustAsixPhy,
     name: "rust_asix_phy",
-    author: "Rust for Linux Contributors",
+    author: "FUJITA Tomonori <fujita.tomonori@gmail.com>",
     description: "Rust Asix PHYs driver",
     license: "GPL",
 }
 
-const MII_BMCR: u32 = 0x00;
-const BMCR_SPEED100: u32 = 0x2000;
-const BMCR_FULLDPLX: u32 = 0x0100;
+struct RustAsixPhy;
 
-struct PhyAx88772A {}
-
-impl PhyAx88772A {
-    const PHY_ID_ASIX_AX88772A: u32 = 0x003b1861;
+// Performs a software PHY reset using the standard
+// BMCR_RESET bit and poll for the reset bit to be cleared.
+// Toggle BMCR_RESET bit off to accommodate broken AX8796B PHY implementation
+// such as used on the Individual Computers' X-Surf 100 Zorro card.
+fn asix_soft_reset(dev: &mut phy::Device) -> Result {
+    dev.write(uapi::MII_BMCR as u16, 0)?;
+    dev.genphy_soft_reset()
 }
 
+struct PhyAX88772A;
+
 #[vtable]
-impl phy::Driver for PhyAx88772A {
-    const FLAGS: u32 = phy::PHY_IS_INTERNAL;
+impl phy::Driver for PhyAX88772A {
+    const FLAGS: u32 = phy::flags::IS_INTERNAL;
+    const NAME: &'static CStr = c_str!("Asix Electronics AX88772A");
+    const PHY_DEVICE_ID: phy::DeviceId = phy::DeviceId::new_with_exact_mask(0x003b1861);
 
-    fn match_phy_device(dev: &mut phy::Device) -> bool {
-        dev.id() == Self::PHY_ID_ASIX_AX88772A
-    }
-
-    fn read_status(dev: &mut phy::Device) -> Result {
-        dev.update_link()?;
-        if !dev.link() {
-            return Ok(());
+    // AX88772A is not working properly with some old switches (NETGEAR EN 108TP):
+    // after autoneg is done and the link status is reported as active, the MII_LPA
+    // register is 0. This issue is not reproducible on AX88772C.
+    fn read_status(dev: &mut phy::Device) -> Result<u16> {
+        dev.genphy_update_link()?;
+        if !dev.get_link() {
+            return Ok(0);
         }
-        let ret = dev.read(MII_BMCR)?;
+        // If MII_LPA is 0, phy_resolve_aneg_linkmode() will fail to resolve
+        // linkmode so use MII_BMCR as default values.
+        let ret = dev.read(uapi::MII_BMCR as u16)?;
 
-        if ret as u32 & BMCR_SPEED100 != 0 {
+        if ret as u32 & uapi::BMCR_SPEED100 != 0 {
             dev.set_speed(100);
         } else {
             dev.set_speed(10);
         }
 
-        let duplex = ret as u32 & BMCR_FULLDPLX != 0;
+        let duplex = if ret as u32 & uapi::BMCR_FULLDPLX != 0 {
+            phy::DuplexMode::Full
+        } else {
+            phy::DuplexMode::Half
+        };
         dev.set_duplex(duplex);
 
-        dev.read_lpa()?;
+        dev.genphy_read_lpa()?;
 
         if dev.is_autoneg_enabled() && dev.is_autoneg_completed() {
             dev.resolve_aneg_linkmode();
         }
 
-        Ok(())
+        Ok(0)
     }
 
     fn suspend(dev: &mut phy::Device) -> Result {
-        dev.suspend()
+        dev.genphy_suspend()
     }
 
     fn resume(dev: &mut phy::Device) -> Result {
-        dev.resume()
+        dev.genphy_resume()
     }
 
     fn soft_reset(dev: &mut phy::Device) -> Result {
-        dev.write(MII_BMCR, 0)?;
-        dev.soft_reset()
+        asix_soft_reset(dev)
     }
 
     fn link_change_notify(dev: &mut phy::Device) {
+        // Reset PHY, otherwise MII_LPA will provide outdated information.
+        // This issue is reproducible only with some link partner PHYs.
         if dev.state() == phy::DeviceState::NoLink {
             let _ = dev.init_hw();
             let _ = dev.start_aneg();
@@ -77,29 +95,35 @@ impl phy::Driver for PhyAx88772A {
     }
 }
 
-struct RustAsixPhy {
-    _reg: phy::Registration<1>,
-}
+struct PhyAX88772C;
 
-impl kernel::Module for RustAsixPhy {
-    fn init(module: &'static ThisModule) -> Result<Self> {
-        pr_info!("Rust Asix phy driver\n");
-        let mut reg: phy::Registration<1> = phy::Registration::new(module);
+#[vtable]
+impl Driver for PhyAX88772C {
+    const FLAGS: u32 = phy::flags::IS_INTERNAL;
+    const NAME: &'static CStr = c_str!("Asix Electronics AX88772C");
+    const PHY_DEVICE_ID: phy::DeviceId = phy::DeviceId::new_with_exact_mask(0x003b1881);
 
-        reg.register(&phy::Adapter::<PhyAx88772A>::new(c_str!(
-            "Asix Electronics AX88772A"
-        )))?;
-        Ok(RustAsixPhy { _reg: reg })
+    fn suspend(dev: &mut phy::Device) -> Result {
+        dev.genphy_suspend()
+    }
+
+    fn resume(dev: &mut phy::Device) -> Result {
+        dev.genphy_resume()
+    }
+
+    fn soft_reset(dev: &mut phy::Device) -> Result {
+        asix_soft_reset(dev)
     }
 }
 
-impl Drop for RustAsixPhy {
-    fn drop(&mut self) {
-        pr_info!("Rust Asix phy driver (exit)\n");
+struct PhyAX88796B;
+
+#[vtable]
+impl Driver for PhyAX88796B {
+    const NAME: &'static CStr = c_str!("Asix Electronics AX88796B");
+    const PHY_DEVICE_ID: phy::DeviceId = phy::DeviceId::new_with_model_mask(0x003b1841);
+
+    fn soft_reset(dev: &mut phy::Device) -> Result {
+        asix_soft_reset(dev)
     }
 }
-
-kernel::phy_module_device_table!(
-    __mod_mdio__asix_tbl_device_table,
-    [(PhyAx88772A::PHY_ID_ASIX_AX88772A, 0xffffffff)]
-);
