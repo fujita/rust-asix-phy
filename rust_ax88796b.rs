@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2023 FUJITA Tomonori <fujita.tomonori@gmail.com>
 
 //! Rust Asix PHYs driver
+//!
+//! C version of this driver: [`drivers/net/phy/ax88796b.c`](./ax88796b.c)
 use kernel::c_str;
 use kernel::net::phy::{self, DeviceId, Driver};
 use kernel::prelude::*;
@@ -13,14 +16,11 @@ kernel::module_phy_driver! {
         DeviceId::new_with_driver::<PhyAX88772C>(),
         DeviceId::new_with_driver::<PhyAX88796B>()
     ],
-    type: RustAsixPhy,
     name: "rust_asix_phy",
     author: "FUJITA Tomonori <fujita.tomonori@gmail.com>",
     description: "Rust Asix PHYs driver",
     license: "GPL",
 }
-
-struct RustAsixPhy;
 
 // Performs a software PHY reset using the standard
 // BMCR_RESET bit and poll for the reset bit to be cleared.
@@ -52,9 +52,9 @@ impl phy::Driver for PhyAX88772A {
         let ret = dev.read(uapi::MII_BMCR as u16)?;
 
         if ret as u32 & uapi::BMCR_SPEED100 != 0 {
-            dev.set_speed(100);
+            dev.set_speed(uapi::SPEED_100);
         } else {
-            dev.set_speed(10);
+            dev.set_speed(uapi::SPEED_10);
         }
 
         let duplex = if ret as u32 & uapi::BMCR_FULLDPLX != 0 {
