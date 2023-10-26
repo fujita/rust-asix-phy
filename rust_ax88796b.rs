@@ -44,7 +44,7 @@ impl phy::Driver for PhyAX88772A {
     // register is 0. This issue is not reproducible on AX88772C.
     fn read_status(dev: &mut phy::Device) -> Result<u16> {
         dev.genphy_update_link()?;
-        if !dev.get_link() {
+        if !dev.is_link_up() {
             return Ok(0);
         }
         // If MII_LPA is 0, phy_resolve_aneg_linkmode() will fail to resolve
